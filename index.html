@@ -3,7 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#121211">
+<meta name="theme-color" content="#f4f4f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
+<!-- Installable as a home-screen app (Safari: Share → Add to Home Screen). The manifest,
+     icons and sw.js live next to the published copy in the qrpack-receiver repo. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="qrpack">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>qrpack receiver</title>
 <!--
   Scans the QR codes made by `qrpack.py encode` and rebuilds the files.
@@ -272,6 +281,18 @@ function canShare(files) {
   try { return !!navigator.canShare?.({ files }); } catch { return false; }
 }
 
+// Opened from the home screen rather than in a browser tab.
+function installed() {
+  return window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true;
+}
+
+// Downloads are unreliable in an iPhone home-screen app, so there the share
+// sheet (which has Save to Files) does the saving.
+function saveFile(file) {
+  if (installed() && canShare([file])) shareFiles([file]);
+  else saveBlob(file.name, file);
+}
+
 // ----- unpacking -----
 async function inflate(bytes) {
   if ("DecompressionStream" in window) {
@@ -466,9 +487,9 @@ function showResult({ name, files }) {
     ? new File([files[0].data], files[0].path.split("/").pop(), { type: "application/octet-stream" })
     : new File([makeZip(files.map((f) => ({ path: `${name}/${f.path}`, data: f.data })))], `${name}.zip`, { type: "application/zip" });
   $("saveAllBtn").textContent = single ? `Save ${mainFile.name}` : `Download ${mainFile.name}`;
-  $("saveAllBtn").onclick = () => saveBlob(mainFile.name, mainFile);
+  $("saveAllBtn").onclick = () => saveFile(mainFile);
   const shareable = single ? new File([files[0].data], mainFile.name, { type: "text/plain" }) : mainFile;
-  $("shareAllBtn").hidden = !canShare([shareable]);
+  $("shareAllBtn").hidden = installed() || !canShare([shareable]); // installed: Save already shares
   $("shareAllBtn").onclick = () => shareFiles([shareable]);
 
   const list = $("fileList");
@@ -486,7 +507,7 @@ function showResult({ name, files }) {
     }
     if (!single) {
       const save = Object.assign(document.createElement("button"), { textContent: "Save" });
-      save.onclick = () => saveBlob(f.path.split("/").pop(), new Blob([f.data], { type: "application/octet-stream" }));
+      save.onclick = () => saveFile(new File([f.data], f.path.split("/").pop(), { type: "application/octet-stream" }));
       li.append(save);
     }
     list.append(li);
@@ -515,7 +536,7 @@ function showPlain(text) {
   $("plainView").hidden = false;
   $("scanView").hidden = true;
   $("plainText").textContent = text;
-  $("plainSave").onclick = () => saveBlob($("plainName").value.trim() || "script.py", new Blob([text], { type: "application/octet-stream" }));
+  $("plainSave").onclick = () => saveFile(new File([text], $("plainName").value.trim() || "script.py", { type: "application/octet-stream" }));
   $("plainCopy").onclick = () => copy(text, $("plainCopy"));
 }
 
@@ -715,6 +736,10 @@ $("insecure").hidden = window.isSecureContext;
 updateStatus();
 
 // Handy for debugging from the console, and used by the tests.
+// Offline support for the installed app. Fails quietly where there's no sw.js
+// (opened from disk, or from this repo rather than the published copy).
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
 window.qrpack = { ingest, decodeFrom, ensureDecoder, makeZip, parseContainer, inflate, state: S, get result() { return result; } };
 </script>
 </body>
