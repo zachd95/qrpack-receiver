@@ -8,7 +8,8 @@ Open it on a phone, tap **Start camera**, and point it at the QR player that
 the files as a `.zip`, or a single file to save or share.
 
 Everything is decoded in the browser. The page only downloads the jsQR decoder
-from jsDelivr; the files you scan are never uploaded anywhere.
+from jsDelivr; the files you scan are never uploaded anywhere. Transfers made with
+`qrpack.py encode --encrypt` ask for their passphrase and are decrypted on the phone.
 
 ## Install as an app
 

@@ -102,7 +102,8 @@
     margin: 0; padding: 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line);
     font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow: auto; max-height: 60vh; white-space: pre;
   }
-  input[type=text] { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
+  #unlockForm input { flex: 1 1 100%; }
+  input[type=text], input[type=password] { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
   label.field { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
 
   dialog { width: min(960px, 100vw - 24px); max-height: calc(100vh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); }
@@ -170,6 +171,16 @@
     <button id="againBtn">Receive something else</button>
   </section>
 
+  <section id="unlockView" class="card" hidden>
+    <h2>Encrypted transfer</h2>
+    <p class="hint" id="unlockMeta"></p>
+    <form id="unlockForm" class="actions">
+      <input type="password" id="passphrase" placeholder="Passphrase" autocomplete="current-password" required>
+      <button id="unlockBtn" class="primary">Unlock</button>
+    </form>
+    <p class="err" id="unlockError" hidden></p>
+  </section>
+
   <section id="plainView" class="card" hidden>
     <h2>Plain-text QR code</h2>
     <label class="field">Save as <input type="text" id="plainName" value="script.py" autocomplete="off"></label>
@@ -193,6 +204,7 @@
 "use strict";
 const JSQR_URL = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
 const PAKO_URL = "https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako_inflate.min.js";
+const ENC_MAGIC = "QPE1", ENC_HEADER = 36, MAX_KDF_ITERATIONS = 10_000_000; // same as qrpack.py
 const FRAME_RE = /^QP1:([0-9A-F]{8}):(\d+):(\d+):([0-9A-Z $%*+\-.\/:]*)$/;
 const MAX_FRAMES = 20000; // same limit as qrpack.py; anything bigger is a stray or hostile code
 const B45 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
@@ -451,11 +463,56 @@ async function finish() {
     const payload = new Uint8Array(len);
     let off = 0;
     for (const c of S.chunks) { payload.set(c, off); off += c.length; }
-    result = parseContainer(await inflate(payload));
-    showResult(result);
+    if (new TextDecoder().decode(payload.subarray(0, 4)) === ENC_MAGIC) {
+      sealed = payload;
+      showUnlock();
+      return;
+    }
+    await unpack(payload);
   } catch (e) {
     showError(`Could not unpack (${e.message}). Press Reset and scan again.`);
   }
+}
+
+async function unpack(payload) {
+  result = parseContainer(await inflate(payload));
+  showResult(result);
+}
+
+// ----- encrypted transfers (see the wire format in qrpack.py) -----
+let sealed = null; // a complete encrypted payload waiting for its passphrase
+
+async function decrypt(blob, passphrase) {
+  if (!crypto?.subtle) throw new Error("this browser can't decrypt here (it needs https://)");
+  const header = blob.subarray(0, ENC_HEADER);
+  const salt = blob.subarray(4, 20), iv = blob.subarray(20, 32);
+  const iterations = new DataView(blob.buffer, blob.byteOffset + 32, 4).getUint32(0);
+  if (iterations < 1 || iterations > MAX_KDF_ITERATIONS) throw new Error("not a qrpack transfer");
+  // NFC so "é" typed here and on the computer gives the same bytes.
+  const secret = await crypto.subtle.importKey("raw", new TextEncoder().encode(passphrase.normalize("NFC")), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, secret,
+    { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: header }, key, blob.subarray(ENC_HEADER)));
+  } catch {
+    throw new Error("Wrong passphrase");
+  }
+}
+
+// Rejects with "Wrong passphrase" and keeps the payload, so another try needs no rescan.
+async function unlock(passphrase) {
+  const plain = await decrypt(sealed, passphrase);
+  sealed = null;
+  $("unlockView").hidden = true;
+  await unpack(plain);
+}
+
+function showUnlock() {
+  $("scanView").hidden = true;
+  $("unlockView").hidden = false;
+  const scanned = S.total === 1 ? "The code is in." : `All ${S.total} codes are in.`;
+  $("unlockMeta").textContent = `${scanned} Enter the passphrase you used with --encrypt.`;
+  $("passphrase").focus();
 }
 
 function showError(msg) {
@@ -466,9 +523,11 @@ function showError(msg) {
 function reset() {
   Object.assign(S, { sid: null, total: 0, chunks: [], got: 0, foreign: new Set(), done: false });
   result = null;
+  sealed = null;
+  $("passphrase").value = "";
   $("cells").replaceChildren();
   $("statusTitle").textContent = "Waiting for the first QR code";
-  for (const id of ["note", "scanError", "resultView", "plainView"]) $(id).hidden = true;
+  for (const id of ["note", "scanError", "resultView", "plainView", "unlockView", "unlockError"]) $(id).hidden = true;
   $("scanView").hidden = false;
   updateStatus();
   if (!stream) $("cover").hidden = false;
@@ -726,6 +785,24 @@ $("cameraSelect").onchange = (e) => startCamera(e.target.value);
 $("photos").onchange = async (e) => { await addPhotos([...e.target.files]); e.target.value = ""; };
 $("resetBtn").onclick = reset;
 $("againBtn").onclick = reset;
+$("unlockForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $("unlockBtn"), err = $("unlockError");
+  btn.disabled = true;
+  btn.textContent = "Unlocking…";
+  err.hidden = true;
+  try {
+    await unlock($("passphrase").value);
+    $("passphrase").value = "";
+  } catch (ex) {
+    err.hidden = false;
+    err.textContent = ex.message;
+    $("passphrase").select();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Unlock";
+  }
+};
 $("plainBack").onclick = () => {
   dismissedPlain = $("plainText").textContent;
   $("plainView").hidden = true;
@@ -740,7 +817,11 @@ updateStatus();
 // (opened from disk, or from this repo rather than the published copy).
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
-window.qrpack = { ingest, decodeFrom, ensureDecoder, makeZip, parseContainer, inflate, state: S, get result() { return result; } };
+window.qrpack = {
+  ingest, decodeFrom, ensureDecoder, makeZip, parseContainer, inflate, unlock, state: S,
+  get result() { return result; },
+  get locked() { return sealed !== null; },
+};
 </script>
 </body>
 </html>
